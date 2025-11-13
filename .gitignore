@@ -17,8 +17,6 @@ data/iplist
 # Go workspace file
 go.work
 
-# Embedded frontend files (regenerated during build)
-internal/web/dist/
 
 # IDE
 .vscode/

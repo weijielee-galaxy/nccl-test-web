@@ -974,6 +974,8 @@ function NCCLTest() {
                     maxH="600px"
                     overflowY="auto"
                     overflowX="auto"
+                    width="0"
+                    minWidth="100%"
                     fontFamily="'Fira Code', 'Consolas', 'Monaco', monospace"
                     fontSize="sm"
                     whiteSpace="pre"
