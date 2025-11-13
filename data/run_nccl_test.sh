@@ -13,6 +13,5 @@
      -x NCCL_IB_GID_INDEX=3 \
      -x NCCL_MIN_NCHANNELS=32 \
      -x NCCL_IB_QPS_PER_CONNECTION=8 \
-     /usr/local/sihpc/libexec/nccl-tests/nccl_test
-     #/usr/local/sihpc/libexec/nccl-tests/all_reduce_perf -b 1 -e 1
+     /usr/local/sihpc/libexec/nccl-tests/nccl_test  -b 1 -e 1k
 

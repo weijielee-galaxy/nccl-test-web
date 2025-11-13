@@ -1,0 +1,30 @@
+# Binaries
+nccl-test-web
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+nccl-test-web
+
+# Output of the go coverage tool
+*.out
+
+# Data files
+data/iplist
+
+# Go workspace file
+go.work
+
+# Embedded frontend files (regenerated during build)
+internal/web/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+web/node_modules/

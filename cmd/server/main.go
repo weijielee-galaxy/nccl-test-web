@@ -1,0 +1,85 @@
+package main
+
+import (
+	"io/fs"
+	"log"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/weijielee-galaxy/nccl-test-web/internal/handlers"
+	"github.com/weijielee-galaxy/nccl-test-web/web"
+)
+
+func main() {
+	// 创建 Gin 路由
+	r := gin.Default()
+
+	// 注册API路由
+	r.GET("/healthz", handlers.HealthCheck)
+
+	// IP列表管理接口（增删改查）
+	r.POST("/iplist", handlers.SaveIPList)     // 创建/新增
+	r.GET("/iplist", handlers.GetIPList)       // 查询
+	r.PUT("/iplist", handlers.UpdateIPList)    // 更新/修改
+	r.DELETE("/iplist", handlers.DeleteIPList) // 删除
+
+	// NCCL 测试接口
+	r.GET("/nccl/defaults", handlers.GetNCCLTestDefaults)  // 获取默认参数
+	r.POST("/nccl/run", handlers.RunNCCLTest)              // 运行测试（一次性返回）
+	r.POST("/nccl/run-stream", handlers.RunNCCLTestStream) // 运行测试（流式返回）
+
+	// 嵌入前端静态文件
+	staticFS, err := web.GetDistFS()
+	if err != nil {
+		log.Fatal("Failed to load embedded web files:", err)
+	}
+
+	// 提供静态文件服务
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+
+		// 对于根路径，返回 index.html
+		if path == "/" {
+			path = "/index.html"
+		}
+
+		// 尝试读取文件
+		data, err := fs.ReadFile(staticFS, path[1:])
+		if err != nil {
+			// 如果文件不存在，返回 index.html（支持 SPA 路由）
+			data, err = fs.ReadFile(staticFS, "index.html")
+			if err != nil {
+				c.String(http.StatusNotFound, "404 page not found")
+				return
+			}
+			c.Data(http.StatusOK, "text/html", data)
+			return
+		}
+
+		// 根据文件扩展名设置 Content-Type
+		contentType := "text/html"
+		if len(path) > 3 {
+			ext := path[len(path)-3:]
+			switch ext {
+			case ".js":
+				contentType = "application/javascript"
+			case "css":
+				contentType = "text/css"
+			case "png":
+				contentType = "image/png"
+			case "jpg", "peg":
+				contentType = "image/jpeg"
+			case "svg":
+				contentType = "image/svg+xml"
+			}
+		}
+
+		c.Data(http.StatusOK, contentType, data)
+	})
+
+	// 启动服务器
+	log.Println("Starting server on :8098")
+	if err := r.Run(":8098"); err != nil {
+		log.Fatal("Failed to start server:", err)
+	}
+}
