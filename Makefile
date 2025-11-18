@@ -3,18 +3,12 @@
 all: build
 
 # Build everything
-build: build-frontend copy-dist build-backend
+build: build-frontend build-backend
 
 # Build frontend
 build-frontend:
 	@echo "Building frontend..."
 	cd web && npm install && npm run build
-
-# Copy frontend dist to internal/web
-copy-dist:
-	@echo "Copying frontend dist to internal/web..."
-	@rm -rf internal/web/dist
-	@cp -r web/dist internal/web/
 
 # Build backend
 build-backend:
@@ -32,7 +26,6 @@ clean:
 	@rm -f nccl-test-web
 	@rm -rf web/dist
 	@rm -rf web/node_modules
-	@rm -rf internal/web/dist
 	@rm -rf data/iplist
 
 # Development mode - run backend

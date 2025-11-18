@@ -1,8 +1,9 @@
-const API_BASE = ''
+const API_BASE = '/api/v1'
+const HEALTH_CHECK_URL = '/healthz'
 
 async function request(url, options = {}) {
   try {
-    const response = await fetch(`${API_BASE}${url}`, {
+    const response = await fetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -24,30 +25,30 @@ async function request(url, options = {}) {
 
 export const api = {
   // Health check
-  healthCheck: () => request('/healthz'),
+  healthCheck: () => request(HEALTH_CHECK_URL),
 
   // IP List management
-  getIPList: () => request('/iplist'),
+  getIPList: () => request(`${API_BASE}/iplist`),
   
-  createIPList: (iplist) => request('/iplist', {
+  createIPList: (iplist) => request(`${API_BASE}/iplist`, {
     method: 'POST',
     body: JSON.stringify({ iplist }),
   }),
   
-  updateIPList: (iplist) => request('/iplist', {
+  updateIPList: (iplist) => request(`${API_BASE}/iplist`, {
     method: 'PUT',
     body: JSON.stringify({ iplist }),
   }),
   
-  deleteIPList: () => request('/iplist', {
+  deleteIPList: () => request(`${API_BASE}/iplist`, {
     method: 'DELETE',
   }),
 
   // NCCL Test
-  getNCCLDefaults: () => request('/nccl/defaults'),
+  getNCCLDefaults: () => request(`${API_BASE}/nccl/defaults`),
   
   // 普通 NCCL Test - 等待完成后返回
-  runNCCLTest: (params) => request('/nccl/run', {
+  runNCCLTest: (params) => request(`${API_BASE}/nccl/run`, {
     method: 'POST',
     body: JSON.stringify(params),
   }),

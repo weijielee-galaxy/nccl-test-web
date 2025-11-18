@@ -17,16 +17,20 @@ func main() {
 	// 注册API路由
 	r.GET("/healthz", handlers.HealthCheck)
 
-	// IP列表管理接口（增删改查）
-	r.POST("/iplist", handlers.SaveIPList)     // 创建/新增
-	r.GET("/iplist", handlers.GetIPList)       // 查询
-	r.PUT("/iplist", handlers.UpdateIPList)    // 更新/修改
-	r.DELETE("/iplist", handlers.DeleteIPList) // 删除
+	// API v1 路由组
+	v1 := r.Group("/api/v1")
+	{
+		// IP列表管理接口（增删改查）
+		v1.POST("/iplist", handlers.SaveIPList)     // 创建/新增
+		v1.GET("/iplist", handlers.GetIPList)       // 查询
+		v1.PUT("/iplist", handlers.UpdateIPList)    // 更新/修改
+		v1.DELETE("/iplist", handlers.DeleteIPList) // 删除
 
-	// NCCL 测试接口
-	r.GET("/nccl/defaults", handlers.GetNCCLTestDefaults)  // 获取默认参数
-	r.POST("/nccl/run", handlers.RunNCCLTest)              // 运行测试（一次性返回）
-	r.POST("/nccl/run-stream", handlers.RunNCCLTestStream) // 运行测试（流式返回）
+		// NCCL 测试接口
+		v1.GET("/nccl/defaults", handlers.GetNCCLTestDefaults)  // 获取默认参数
+		v1.POST("/nccl/run", handlers.RunNCCLTest)              // 运行测试（一次性返回）
+		v1.POST("/nccl/run-stream", handlers.RunNCCLTestStream) // 运行测试（流式返回）
+	}
 
 	// 嵌入前端静态文件
 	staticFS, err := web.GetDistFS()
