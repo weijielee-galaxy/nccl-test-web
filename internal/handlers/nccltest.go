@@ -7,9 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+)
+
+// 全局变量：当前运行的 NCCL 测试进程
+var (
+	currentCmd   *exec.Cmd
+	currentMutex sync.Mutex
 )
 
 // NCCLTestParams 定义 NCCL 测试参数
@@ -20,11 +28,12 @@ type NCCLTestParams struct {
 	NCCLIBGIDIndex         int         `json:"nccl_ib_gid_index" binding:"required"`
 	NCCLMinChannels        int         `json:"nccl_min_channels" binding:"required"`
 	NCCLIBQPSPerConnection int         `json:"nccl_ib_qps_per_connection" binding:"required"`
-	TestSizeBegin          interface{} `json:"test_size_begin" binding:"required"` // 支持 int 或 string (如 "8K", "128M")
-	TestSizeEnd            interface{} `json:"test_size_end" binding:"required"`   // 支持 int 或 string (如 "8K", "128M")
-	Timeout                int         `json:"timeout"`                            // 超时时间（秒），0 表示不超时
-	EnableDebug            bool        `json:"enable_debug"`                       // 是否启用 NCCL DEBUG
-	NCCLDebugLevel         string      `json:"nccl_debug_level"`                   // NCCL DEBUG 级别: WARN, INFO, TRACE
+	TestSizeBegin          interface{} `json:"test_size_begin"`  // 支持 int 或 string (如 "8K", "128M")，可选
+	TestSizeEnd            interface{} `json:"test_size_end"`    // 支持 int 或 string (如 "8K", "128M")，可选
+	Iters                  int         `json:"iters"`            // 迭代次数，可选
+	Timeout                int         `json:"timeout"`          // 超时时间（秒），0 表示不超时
+	EnableDebug            bool        `json:"enable_debug"`     // 是否启用 NCCL DEBUG
+	NCCLDebugLevel         string      `json:"nccl_debug_level"` // NCCL DEBUG 级别: WARN, INFO, TRACE
 }
 
 // NCCLTestResponse 定义测试响应
@@ -60,10 +69,27 @@ func RunNCCLTest(c *gin.Context) {
 	// 执行命令
 	execCmd := exec.CommandContext(ctx, "bash", "-c", cmd)
 
+	// 设置进程组，以便能够杀死整个进程树
+	execCmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
 	// 捕获输出
 	var stdout, stderr bytes.Buffer
 	execCmd.Stdout = &stdout
 	execCmd.Stderr = &stderr
+
+	// 注册当前运行的命令
+	currentMutex.Lock()
+	currentCmd = execCmd
+	currentMutex.Unlock()
+
+	// 确保执行完成后清理
+	defer func() {
+		currentMutex.Lock()
+		currentCmd = nil
+		currentMutex.Unlock()
+	}()
 
 	// 执行
 	err := execCmd.Run()
@@ -115,6 +141,11 @@ func RunNCCLTestStream(c *gin.Context) {
 	// 执行命令，合并 stdout 和 stderr
 	execCmd := exec.Command("bash", "-c", cmd+" 2>&1")
 
+	// 设置进程组，以便能够杀死整个进程树
+	execCmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+	}
+
 	// 获取输出管道
 	stdout, err := execCmd.StdoutPipe()
 	if err != nil {
@@ -127,6 +158,18 @@ func RunNCCLTestStream(c *gin.Context) {
 		c.SSEvent("error", gin.H{"message": err.Error()})
 		return
 	}
+
+	// 注册当前运行的命令
+	currentMutex.Lock()
+	currentCmd = execCmd
+	currentMutex.Unlock()
+
+	// 确保执行完成后清理
+	defer func() {
+		currentMutex.Lock()
+		currentCmd = nil
+		currentMutex.Unlock()
+	}()
 
 	// 发送命令信息
 	c.SSEvent("command", cmd)
@@ -161,12 +204,54 @@ func GetNCCLTestDefaults(c *gin.Context) {
 		NCCLIBQPSPerConnection: 8,
 		TestSizeBegin:          1,
 		TestSizeEnd:            1,
+		Iters:                  20,
 		Timeout:                600,
 		EnableDebug:            false,
 		NCCLDebugLevel:         "WARN",
 	}
 
 	c.JSON(http.StatusOK, defaults)
+}
+
+// StopNCCLTest 停止当前运行的 NCCL 测试
+func StopNCCLTest(c *gin.Context) {
+	currentMutex.Lock()
+	defer currentMutex.Unlock()
+
+	if currentCmd == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "no_task",
+			"message": "No running NCCL test to stop",
+		})
+		return
+	}
+
+	if currentCmd.Process == nil {
+		currentCmd = nil
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "no_process",
+			"message": "Command has no process",
+		})
+		return
+	}
+
+	// 杀死整个进程组（包括所有子进程）
+	// 使用负的 PID 向整个进程组发送信号
+	pgid := currentCmd.Process.Pid
+	err := syscall.Kill(-pgid, syscall.SIGKILL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "error",
+			"message": fmt.Sprintf("Failed to kill process group: %v", err),
+		})
+		return
+	}
+
+	currentCmd = nil
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "stopped",
+		"message": "NCCL test stopped successfully",
+	})
 }
 
 // buildNCCLCommand 构建 NCCL 测试命令
@@ -205,13 +290,24 @@ func buildNCCLCommand(params NCCLTestParams) string {
     -x NCCL_IB_GID_INDEX=%d \
     -x NCCL_MIN_NCHANNELS=%d \
     -x NCCL_IB_QPS_PER_CONNECTION=%d \
-    /usr/local/sihpc/libexec/nccl-tests/nccl_test -b %v -e %v`,
+    /usr/local/sihpc/libexec/nccl-tests/nccl_test`,
 		params.NCCLIBGIDIndex,
 		params.NCCLMinChannels,
 		params.NCCLIBQPSPerConnection,
-		params.TestSizeBegin,
-		params.TestSizeEnd,
 	)
+
+	// 只在有测试大小参数时才添加 -b 和 -e
+	if params.TestSizeBegin != nil && params.TestSizeBegin != "" {
+		cmd += fmt.Sprintf(` -b %v`, params.TestSizeBegin)
+	}
+	if params.TestSizeEnd != nil && params.TestSizeEnd != "" {
+		cmd += fmt.Sprintf(` -e %v`, params.TestSizeEnd)
+	}
+
+	// 只在有迭代次数参数时才添加 -n
+	if params.Iters > 0 {
+		cmd += fmt.Sprintf(` -n %d`, params.Iters)
+	}
 
 	return cmd
 }

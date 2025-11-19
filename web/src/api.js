@@ -52,6 +52,14 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(params),
   }),
+
+  // 停止当前运行的 NCCL Test
+  stopNCCLTest: () => request(`${API_BASE}/nccl/stop`, {
+    method: 'POST',
+  }),
+
+  // Precheck - 检查节点 GPU 进程状态
+  precheck: () => request(`${API_BASE}/nccl/precheck`),
   
   // Stream NCCL Test - 使用 Fetch API 进行流式传输
   runNCCLTestStream: (params, callbacks) => {

@@ -39,7 +39,7 @@ import {
   Wrap,
   WrapItem,
 } from '@chakra-ui/react'
-import { MdPlayArrow, MdExpandMore, MdExpandLess, MdEdit, MdCheck, MdClose } from 'react-icons/md'
+import { MdPlayArrow, MdExpandMore, MdExpandLess, MdEdit, MdCheck, MdClose, MdStop } from 'react-icons/md'
 import { Line } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
@@ -87,6 +87,7 @@ function NCCLTest() {
   const [params, setParams] = useState(null)
   const [loading, setLoading] = useState(true)
   const [running, setRunning] = useState(false)
+  const [prechecking, setPrechecking] = useState(false)
   const [result, setResult] = useState(null)
   
   // IP 地址编辑
@@ -97,6 +98,10 @@ function NCCLTest() {
   // 测试大小的单位
   const [beginUnit, setBeginUnit] = useState('')
   const [endUnit, setEndUnit] = useState('M')  // 默认 MB
+  
+  // 测试大小和迭代次数的开关
+  const [enableTestSize, setEnableTestSize] = useState(true)  // 默认启用测试大小
+  const [enableIters, setEnableIters] = useState(true)  // 默认启用迭代次数
   
   // Stream 模式开关
   const [useStream, setUseStream] = useState(true)  // 默认开启
@@ -252,9 +257,6 @@ function NCCLTest() {
   const generatedScript = useMemo(() => {
     if (!params) return ''
     
-    const beginSize = `${params.test_size_begin}${beginUnit}`
-    const endSize = `${params.test_size_end}${endUnit}`
-    
     let script = `/usr/local/sihpc/bin/mpirun \\
     --allow-run-as-root \\
     --hostfile ./data/iplist \\
@@ -277,10 +279,22 @@ function NCCLTest() {
     -x NCCL_IB_GID_INDEX=${params.nccl_ib_gid_index} \\
     -x NCCL_MIN_NCHANNELS=${params.nccl_min_channels} \\
     -x NCCL_IB_QPS_PER_CONNECTION=${params.nccl_ib_qps_per_connection} \\
-    /usr/local/sihpc/libexec/nccl-tests/nccl_test -b ${beginSize} -e ${endSize}`
+    /usr/local/sihpc/libexec/nccl-tests/nccl_test`
+    
+    // 只在启用时添加测试大小参数
+    if (enableTestSize) {
+      const beginSize = `${params.test_size_begin}${beginUnit}`
+      const endSize = `${params.test_size_end}${endUnit}`
+      script += ` -b ${beginSize} -e ${endSize}`
+    }
+    
+    // 只在启用时添加迭代次数参数
+    if (enableIters && params.iters) {
+      script += ` -n ${params.iters}`
+    }
     
     return script
-  }, [params, beginUnit, endUnit])
+  }, [params, beginUnit, endUnit, enableTestSize, enableIters])
 
   // 解析 NCCL 测试数据用于图表
   const chartData = useMemo(() => {
@@ -460,14 +474,73 @@ function NCCLTest() {
   }), [colorMode])
 
   const runTest = async () => {
+    setPrechecking(true)
+    setResult({ status: 'prechecking', output: 'Checking node status...', command: '' })
+
+    // 先执行 precheck
+    const { data: precheckData, error: precheckError } = await api.precheck()
+    
+    setPrechecking(false)
+    
+    if (precheckError) {
+      setResult({
+        status: 'error',
+        output: '',
+        error: `Precheck failed: ${precheckError}`,
+        command: ''
+      })
+      toast({
+        title: 'Precheck failed',
+        description: precheckError,
+        status: 'error',
+        duration: 5000,
+      })
+      return
+    }
+
+    // 检查是否有繁忙的节点
+    if (precheckData && precheckData.busy_count > 0) {
+      // 构建繁忙节点信息
+      const busyInfo = precheckData.busy_nodes
+        .map(node => `${node.ip}: ${node.process_count} process(es)`)
+        .join('\n')
+      
+      setResult({
+        status: 'busy',
+        output: `Found ${precheckData.busy_count} busy node(s):\n\n${busyInfo}`,
+        command: '',
+        busyNodes: precheckData.busy_nodes
+      })
+      
+      toast({
+        title: 'Nodes are busy',
+        description: `${precheckData.busy_count} node(s) have running GPU processes`,
+        status: 'warning',
+        duration: 5000,
+      })
+      return
+    }
+
+    // Precheck 通过，开始运行测试
     setRunning(true)
     setResult({ status: 'running', output: '', command: '' })
 
     // 构建带单位的参数
-    const testParams = {
-      ...params,
-      test_size_begin: `${params.test_size_begin}${beginUnit}`,
-      test_size_end: `${params.test_size_end}${endUnit}`,
+    const testParams = { ...params }
+    
+    // 只在启用时添加测试大小参数
+    if (enableTestSize) {
+      testParams.test_size_begin = `${params.test_size_begin}${beginUnit}`
+      testParams.test_size_end = `${params.test_size_end}${endUnit}`
+    } else {
+      // 不启用时删除这些参数
+      delete testParams.test_size_begin
+      delete testParams.test_size_end
+    }
+    
+    // 只在启用时添加迭代次数参数
+    if (!enableIters) {
+      delete testParams.iters
     }
 
     if (useStream) {
@@ -569,6 +642,41 @@ function NCCLTest() {
     }
   }
 
+  const stopTest = async () => {
+    // 调用后端 API 杀死进程
+    // SSE 连接保持打开，等待接收进程结束后的最终输出
+    const { data, error } = await api.stopNCCLTest()
+    
+    if (error) {
+      toast({
+        title: 'Failed to stop test',
+        description: error,
+        status: 'error',
+        duration: 3000,
+      })
+      return
+    }
+
+    if (data.status === 'stopped') {
+      toast({
+        title: 'Stopping test...',
+        description: 'NCCL test is being stopped',
+        status: 'warning',
+        duration: 2000,
+      })
+      // 不立即设置 setRunning(false)
+      // 等待 SSE 的 onComplete 或 onError 回调来更新状态
+    } else if (data.status === 'no_task') {
+      setRunning(false)
+      toast({
+        title: 'No running test',
+        description: 'There is no test running to stop',
+        status: 'info',
+        duration: 3000,
+      })
+    }
+  }
+
   const updateParam = (key, value) => {
     setParams(prev => ({ ...prev, [key]: value }))
   }
@@ -583,7 +691,27 @@ function NCCLTest() {
   }
 
   return (
-    <Box>
+    <Box position="relative">
+      {/* 浮动的停止按钮 */}
+      {running && (
+        <Box
+          position="fixed"
+          bottom="20px"
+          right="20px"
+          zIndex="1000"
+        >
+          <Button
+            leftIcon={<MdStop />}
+            colorScheme="red"
+            onClick={stopTest}
+            size="lg"
+            boxShadow="lg"
+          >
+            Stop Test
+          </Button>
+        </Box>
+      )}
+      
       <VStack spacing={4} align="stretch">
         <HStack justify="space-between" align="start">
           <Box>
@@ -607,12 +735,13 @@ function NCCLTest() {
             </FormControl>
 
             <Button
-              leftIcon={running ? <Spinner size="sm" /> : <MdPlayArrow />}
+              leftIcon={(running || prechecking) ? <Spinner size="sm" /> : <MdPlayArrow />}
               colorScheme="brand"
               onClick={runTest}
-              isLoading={running}
-              loadingText="Running..."
+              isLoading={running || prechecking}
+              loadingText={prechecking ? "Prechecking..." : "Running..."}
               size="md"
+              isDisabled={running || prechecking}
             >
               Run Test
             </Button>
@@ -620,7 +749,7 @@ function NCCLTest() {
             <Button
               variant="outline"
               onClick={loadDefaults}
-              isDisabled={running}
+              isDisabled={running || prechecking}
               size="md"
             >
               Reset
@@ -714,57 +843,97 @@ function NCCLTest() {
                   </NumberInput>
                 </FormControl>
 
-                <FormControl>
-                  <FormLabel fontSize="xs" mb={0.5}>Begin Size</FormLabel>
-                  <HStack spacing={1}>
-                    <NumberInput
-                      size="xs"
-                      value={params.test_size_begin}
-                      onChange={(_, val) => updateParam('test_size_begin', val)}
-                      min={1}
-                      flex={1}
-                    >
-                      <NumberInputField />
-                    </NumberInput>
-                    <Select
-                      size="xs"
-                      value={beginUnit}
-                      onChange={(e) => setBeginUnit(e.target.value)}
-                      w="70px"
-                      minW="70px"
-                    >
-                      {SIZE_UNITS.map(unit => (
-                        <option key={unit.value} value={unit.value}>{unit.label}</option>
-                      ))}
-                    </Select>
+                <FormControl gridColumn="span 2">
+                  <HStack justify="space-between">
+                    <FormLabel fontSize="xs" mb={0}>Enable Test Size (-b / -e)</FormLabel>
+                    <Switch
+                      size="sm"
+                      isChecked={enableTestSize}
+                      onChange={(e) => setEnableTestSize(e.target.checked)}
+                    />
                   </HStack>
                 </FormControl>
 
-                <FormControl>
-                  <FormLabel fontSize="xs" mb={0.5}>End Size</FormLabel>
-                  <HStack spacing={1}>
+                {enableTestSize && (
+                  <>
+                    <FormControl>
+                      <FormLabel fontSize="xs" mb={0.5}>Begin Size</FormLabel>
+                      <HStack spacing={1}>
+                        <NumberInput
+                          size="xs"
+                          value={params.test_size_begin}
+                          onChange={(_, val) => updateParam('test_size_begin', val)}
+                          min={1}
+                          flex={1}
+                        >
+                          <NumberInputField />
+                        </NumberInput>
+                        <Select
+                          size="xs"
+                          value={beginUnit}
+                          onChange={(e) => setBeginUnit(e.target.value)}
+                          w="70px"
+                          minW="70px"
+                        >
+                          {SIZE_UNITS.map(unit => (
+                            <option key={unit.value} value={unit.value}>{unit.label}</option>
+                          ))}
+                        </Select>
+                      </HStack>
+                    </FormControl>
+
+                    <FormControl>
+                      <FormLabel fontSize="xs" mb={0.5}>End Size</FormLabel>
+                      <HStack spacing={1}>
+                        <NumberInput
+                          size="xs"
+                          value={params.test_size_end}
+                          onChange={(_, val) => updateParam('test_size_end', val)}
+                          min={1}
+                          flex={1}
+                        >
+                          <NumberInputField />
+                        </NumberInput>
+                        <Select
+                          size="xs"
+                          value={endUnit}
+                          onChange={(e) => setEndUnit(e.target.value)}
+                          w="70px"
+                          minW="70px"
+                        >
+                          {SIZE_UNITS.map(unit => (
+                            <option key={unit.value} value={unit.value}>{unit.label}</option>
+                          ))}
+                        </Select>
+                      </HStack>
+                    </FormControl>
+                  </>
+                )}
+
+                <FormControl gridColumn="span 2">
+                  <HStack justify="space-between">
+                    <FormLabel fontSize="xs" mb={0}>Enable Iterations (-n)</FormLabel>
+                    <Switch
+                      size="sm"
+                      isChecked={enableIters}
+                      onChange={(e) => setEnableIters(e.target.checked)}
+                    />
+                  </HStack>
+                </FormControl>
+
+                {enableIters && (
+                  <FormControl gridColumn="span 2">
+                    <FormLabel fontSize="xs" mb={0.5}>Iterations</FormLabel>
                     <NumberInput
                       size="xs"
-                      value={params.test_size_end}
-                      onChange={(_, val) => updateParam('test_size_end', val)}
+                      value={params.iters}
+                      onChange={(_, val) => updateParam('iters', val)}
                       min={1}
-                      flex={1}
                     >
                       <NumberInputField />
                     </NumberInput>
-                    <Select
-                      size="xs"
-                      value={endUnit}
-                      onChange={(e) => setEndUnit(e.target.value)}
-                      w="70px"
-                      minW="70px"
-                    >
-                      {SIZE_UNITS.map(unit => (
-                        <option key={unit.value} value={unit.value}>{unit.label}</option>
-                      ))}
-                    </Select>
-                  </HStack>
-                </FormControl>
+                  </FormControl>
+                )}
 
                 <FormControl gridColumn="span 2">
                   <FormLabel fontSize="xs" mb={0.5}>Timeout (seconds)</FormLabel>
@@ -922,12 +1091,14 @@ function NCCLTest() {
           <HStack justify="space-between" mb={4}>
             <Heading size="md">Test Result</Heading>
             <HStack spacing={3}>
-              {running && <Spinner size="sm" />}
+              {(running || prechecking) && <Spinner size="sm" />}
               <Badge
                 colorScheme={
                   result.status === 'success' ? 'green' :
                   result.status === 'running' ? 'blue' :
+                  result.status === 'prechecking' ? 'cyan' :
                   result.status === 'timeout' ? 'yellow' :
+                  result.status === 'busy' ? 'orange' :
                   'red'
                 }
                 fontSize="md"
@@ -966,23 +1137,64 @@ function NCCLTest() {
               <TabPanels>
                 {/* Output Tab */}
                 <TabPanel p={0} pt={4}>
-                  <Box
-                    p={3}
-                    bg={colorMode === 'dark' ? 'gray.800' : 'gray.50'}
-                    borderRadius="md"
-                    borderWidth="1px"
-                    maxH="600px"
-                    overflowY="auto"
-                    overflowX="auto"
-                    width="0"
-                    minWidth="100%"
-                    fontFamily="'Fira Code', 'Consolas', 'Monaco', monospace"
-                    fontSize="sm"
-                    whiteSpace="pre"
-                  >
-                    {result.output || 'Waiting for output...'}
-                    <div ref={outputEndRef} />
-                  </Box>
+                  {result.status === 'busy' && result.busyNodes ? (
+                    // 特殊显示繁忙节点
+                    <VStack align="stretch" spacing={3}>
+                      <Box
+                        p={4}
+                        bg="orange.50"
+                        borderRadius="md"
+                        borderWidth="1px"
+                        borderColor="orange.300"
+                      >
+                        <Text fontWeight="bold" color="orange.700" mb={2}>
+                          ⚠️ Cannot start test: {result.busyNodes.length} node(s) have running GPU processes
+                        </Text>
+                        <Text fontSize="sm" color="orange.600">
+                          Please wait for these processes to complete or stop them manually.
+                        </Text>
+                      </Box>
+                      
+                      <VStack align="stretch" spacing={2}>
+                        {result.busyNodes.map((node, idx) => (
+                          <Box
+                            key={idx}
+                            p={3}
+                            bg={colorMode === 'dark' ? 'gray.700' : 'white'}
+                            borderRadius="md"
+                            borderWidth="1px"
+                            borderColor="orange.300"
+                          >
+                            <HStack justify="space-between">
+                              <Text fontWeight="semibold">{node.ip}</Text>
+                              <Badge colorScheme="orange">
+                                {node.process_count} process{node.process_count > 1 ? 'es' : ''}
+                              </Badge>
+                            </HStack>
+                          </Box>
+                        ))}
+                      </VStack>
+                    </VStack>
+                  ) : (
+                    // 正常显示输出
+                    <Box
+                      p={3}
+                      bg={colorMode === 'dark' ? 'gray.800' : 'gray.50'}
+                      borderRadius="md"
+                      borderWidth="1px"
+                      maxH="600px"
+                      overflowY="auto"
+                      overflowX="auto"
+                      width="0"
+                      minWidth="100%"
+                      fontFamily="'Fira Code', 'Consolas', 'Monaco', monospace"
+                      fontSize="sm"
+                      whiteSpace="pre"
+                    >
+                      {result.output || 'Waiting for output...'}
+                      <div ref={outputEndRef} />
+                    </Box>
+                  )}
                 </TabPanel>
                 
                 {/* Data Tab - 显示解析后的原始数据 */}

@@ -30,6 +30,8 @@ func main() {
 		v1.GET("/nccl/defaults", handlers.GetNCCLTestDefaults)  // 获取默认参数
 		v1.POST("/nccl/run", handlers.RunNCCLTest)              // 运行测试（一次性返回）
 		v1.POST("/nccl/run-stream", handlers.RunNCCLTestStream) // 运行测试（流式返回）
+		v1.POST("/nccl/stop", handlers.StopNCCLTest)            // 停止当前运行的测试
+		v1.GET("/nccl/precheck", handlers.Precheck)             // 检查所有节点的 GPU 进程状态
 	}
 
 	// 嵌入前端静态文件
