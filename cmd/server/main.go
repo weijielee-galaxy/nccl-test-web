@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"io/fs"
 	"log"
 	"net/http"
@@ -11,6 +12,10 @@ import (
 )
 
 func main() {
+	// 命令行参数
+	port := flag.String("port", "8098", "Server port")
+	flag.Parse()
+
 	// 创建 Gin 路由
 	r := gin.Default()
 
@@ -21,10 +26,11 @@ func main() {
 	v1 := r.Group("/api/v1")
 	{
 		// IP列表管理接口（增删改查）
-		v1.POST("/iplist", handlers.SaveIPList)     // 创建/新增
-		v1.GET("/iplist", handlers.GetIPList)       // 查询
-		v1.PUT("/iplist", handlers.UpdateIPList)    // 更新/修改
-		v1.DELETE("/iplist", handlers.DeleteIPList) // 删除
+		v1.GET("/iplist/files", handlers.GetIPListFiles)      // 获取IP列表文件列表
+		v1.POST("/iplist/:filename", handlers.SaveIPList)     // 创建/更新指定文件
+		v1.GET("/iplist/:filename", handlers.GetIPList)       // 读取指定文件
+		v1.PUT("/iplist/:filename", handlers.UpdateIPList)    // 更新指定文件
+		v1.DELETE("/iplist/:filename", handlers.DeleteIPList) // 删除指定文件
 
 		// NCCL 测试接口
 		v1.GET("/nccl/defaults", handlers.GetNCCLTestDefaults)  // 获取默认参数
@@ -32,6 +38,11 @@ func main() {
 		v1.POST("/nccl/run-stream", handlers.RunNCCLTestStream) // 运行测试（流式返回）
 		v1.POST("/nccl/stop", handlers.StopNCCLTest)            // 停止当前运行的测试
 		v1.GET("/nccl/precheck", handlers.Precheck)             // 检查所有节点的 GPU 进程状态
+
+		// 历史记录相关接口
+		v1.GET("/history", handlers.GetHistoryList)              // 获取历史记录列表
+		v1.GET("/history/:filename", handlers.GetHistoryContent) // 获取指定历史记录内容
+		v1.DELETE("/history/:filename", handlers.DeleteHistory)  // 删除指定历史记录
 	}
 
 	// 嵌入前端静态文件
@@ -84,8 +95,8 @@ func main() {
 	})
 
 	// 启动服务器
-	log.Println("Starting server on :8098")
-	if err := r.Run(":8098"); err != nil {
+	log.Printf("Starting server on :%s", *port)
+	if err := r.Run(":" + *port); err != nil {
 		log.Fatal("Failed to start server:", err)
 	}
 }

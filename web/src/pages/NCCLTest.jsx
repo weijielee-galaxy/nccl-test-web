@@ -477,8 +477,26 @@ function NCCLTest() {
     setPrechecking(true)
     setResult({ status: 'prechecking', output: 'Checking node status...', command: '' })
 
-    // 先执行 precheck
-    const { data: precheckData, error: precheckError } = await api.precheck()
+    // 先执行 precheck，并传递 iplist_file 参数（必选）
+    const iplistFile = params?.iplist_file
+    if (!iplistFile) {
+      setResult({
+        status: 'error',
+        output: '',
+        error: 'iplist_file parameter is required',
+        command: ''
+      })
+      toast({
+        title: 'Error',
+        description: 'iplist_file parameter is required',
+        status: 'error',
+        duration: 5000,
+      })
+      setPrechecking(false)
+      return
+    }
+
+    const { data: precheckData, error: precheckError } = await api.precheck(iplistFile)
     
     setPrechecking(false)
     

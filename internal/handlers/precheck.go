@@ -36,8 +36,27 @@ type PrecheckResponse struct {
 
 // Precheck 检查所有节点的 GPU 进程状态
 func Precheck(c *gin.Context) {
+	// 获取 iplist 文件参数，filename 必选
+	iplistFile := c.Query("filename")
+	if iplistFile == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "filename parameter is required",
+		})
+		return
+	}
+
+	// 验证路径安全性，防止路径遍历攻击
+	absIPListDir := filepath.Join(DataDir, "iplist")
+	absPath := filepath.Join(absIPListDir, iplistFile)
+	if !strings.HasPrefix(absPath, absIPListDir) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid filename",
+		})
+		return
+	}
+
 	// 读取 IP 列表
-	filePath := filepath.Join(DataDir, IPListFileName)
+	filePath := filepath.Join(DataDir, "iplist", iplistFile)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		c.JSON(http.StatusOK, PrecheckResponse{
 			TotalNodes: 0,

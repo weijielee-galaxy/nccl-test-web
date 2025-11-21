@@ -59,7 +59,7 @@ export const api = {
   }),
 
   // Precheck - 检查节点 GPU 进程状态
-  precheck: () => request(`${API_BASE}/nccl/precheck`),
+  precheck: (filename) => request(`${API_BASE}/nccl/precheck?filename=${encodeURIComponent(filename)}`),
   
   // Stream NCCL Test - 使用 Fetch API 进行流式传输
   runNCCLTestStream: (params, callbacks) => {

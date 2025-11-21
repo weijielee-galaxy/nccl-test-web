@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -28,12 +29,13 @@ type NCCLTestParams struct {
 	NCCLIBGIDIndex         int         `json:"nccl_ib_gid_index" binding:"required"`
 	NCCLMinChannels        int         `json:"nccl_min_channels" binding:"required"`
 	NCCLIBQPSPerConnection int         `json:"nccl_ib_qps_per_connection" binding:"required"`
-	TestSizeBegin          interface{} `json:"test_size_begin"`  // 支持 int 或 string (如 "8K", "128M")，可选
-	TestSizeEnd            interface{} `json:"test_size_end"`    // 支持 int 或 string (如 "8K", "128M")，可选
-	Iters                  int         `json:"iters"`            // 迭代次数，可选
-	Timeout                int         `json:"timeout"`          // 超时时间（秒），0 表示不超时
-	EnableDebug            bool        `json:"enable_debug"`     // 是否启用 NCCL DEBUG
-	NCCLDebugLevel         string      `json:"nccl_debug_level"` // NCCL DEBUG 级别: WARN, INFO, TRACE
+	TestSizeBegin          interface{} `json:"test_size_begin"`                // 支持 int 或 string (如 "8K", "128M")，可选
+	TestSizeEnd            interface{} `json:"test_size_end"`                  // 支持 int 或 string (如 "8K", "128M")，可选
+	Iters                  int         `json:"iters"`                          // 迭代次数，可选
+	Timeout                int         `json:"timeout"`                        // 超时时间（秒），0 表示不超时
+	EnableDebug            bool        `json:"enable_debug"`                   // 是否启用 NCCL DEBUG
+	NCCLDebugLevel         string      `json:"nccl_debug_level"`               // NCCL DEBUG 级别: WARN, INFO, TRACE
+	IPListFile             string      `json:"iplist_file" binding:"required"` // IP列表文件名，必传
 }
 
 // NCCLTestResponse 定义测试响应
@@ -117,6 +119,9 @@ func RunNCCLTest(c *gin.Context) {
 		response.Output += "\n--- STDERR ---\n" + stderr.String()
 	}
 
+	// 异步保存历史数据
+	SaveHistoryAsync(response.Output)
+
 	c.JSON(http.StatusOK, response)
 }
 
@@ -140,6 +145,8 @@ func RunNCCLTestStream(c *gin.Context) {
 
 	// 执行命令，合并 stdout 和 stderr
 	execCmd := exec.Command("bash", "-c", cmd+" 2>&1")
+
+	fmt.Println(execCmd.String())
 
 	// 设置进程组，以便能够杀死整个进程树
 	execCmd.SysProcAttr = &syscall.SysProcAttr{
@@ -175,22 +182,33 @@ func RunNCCLTestStream(c *gin.Context) {
 	c.SSEvent("command", cmd)
 	c.Writer.Flush()
 
+	// 创建 buffer 缓存所有输出
+	var outputBuffer bytes.Buffer
+	outputBuffer.WriteString(cmd + "\n\n")
+
 	// 读取并流式发送输出
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
 		c.SSEvent("output", line)
 		c.Writer.Flush()
+		// 同时写入 buffer
+		outputBuffer.WriteString(line + "\n")
 	}
 
 	// 等待命令完成
 	err = execCmd.Wait()
 	if err != nil {
-		c.SSEvent("error", gin.H{"message": err.Error()})
+		errorMsg := fmt.Sprintf("Error: %v", err)
+		c.SSEvent("error", gin.H{"message": errorMsg})
+		outputBuffer.WriteString("\n" + errorMsg)
 	} else {
 		c.SSEvent("done", "Command completed successfully")
 	}
 	c.Writer.Flush()
+
+	// 异步保存历史数据
+	SaveHistoryAsync(outputBuffer.String())
 }
 
 // GetNCCLTestDefaults 获取默认参数
@@ -208,6 +226,7 @@ func GetNCCLTestDefaults(c *gin.Context) {
 		Timeout:                600,
 		EnableDebug:            false,
 		NCCLDebugLevel:         "WARN",
+		IPListFile:             "", // 必传，不提供默认值
 	}
 
 	c.JSON(http.StatusOK, defaults)
@@ -256,6 +275,10 @@ func StopNCCLTest(c *gin.Context) {
 
 // buildNCCLCommand 构建 NCCL 测试命令
 func buildNCCLCommand(params NCCLTestParams) string {
+	// 使用传入的 iplist 文件名
+	// 构建 hostfile 路径
+	hostfile := filepath.Join(DataDir, "iplist", params.IPListFile)
+
 	// 基础命令
 	cmd := fmt.Sprintf(`/usr/local/sihpc/bin/mpirun \
     --allow-run-as-root \
@@ -268,7 +291,7 @@ func buildNCCLCommand(params NCCLTestParams) string {
     --mca routed direct \
     --mca plm_rsh_no_tree_spawn 1 \
     -x UCX_TLS=tcp`,
-		DataDir+"/"+IPListFileName,
+		hostfile,
 		params.MapBy,
 		params.OOBTCPInterface,
 		params.BTLTCPInterface,

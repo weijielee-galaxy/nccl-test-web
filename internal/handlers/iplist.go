@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -12,8 +14,12 @@ import (
 const (
 	// DataDir 数据存储目录
 	DataDir = "./data"
-	// IPListFileName IP列表文件名
+	// IPListDir IP列表存储目录
+	IPListDir = "iplist"
+	// IPListFileName IP列表文件名（已弃用，保留用于向后兼容）
 	IPListFileName = "iplist"
+	// DefaultIPListFile 默认IP列表文件名
+	DefaultIPListFile = "default"
 )
 
 // IPListRequest 接收IP列表的请求结构
@@ -27,8 +33,93 @@ type IPListResponse struct {
 	Count  int      `json:"count"`
 }
 
-// SaveIPList 保存IP列表到文件
+// IPListFileInfo IP列表文件信息
+type IPListFileInfo struct {
+	Filename string    `json:"filename"`
+	Modified time.Time `json:"modified"`
+	Size     int64     `json:"size"`
+}
+
+// GetIPListFiles 获取所有IP列表文件
+func GetIPListFiles(c *gin.Context) {
+	iplistDir := filepath.Join(DataDir, IPListDir)
+
+	// 检查目录是否存在，不存在则创建并初始化默认文件
+	if _, err := os.Stat(iplistDir); os.IsNotExist(err) {
+		// 创建目录
+		if err := os.MkdirAll(iplistDir, 0755); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to create IP list directory",
+			})
+			return
+		}
+
+		// 创建默认文件（空文件）
+		defaultFile := filepath.Join(iplistDir, DefaultIPListFile)
+		if err := os.WriteFile(defaultFile, []byte(""), 0644); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to create default IP list file",
+			})
+			return
+		}
+	}
+
+	// 读取目录
+	entries, err := os.ReadDir(iplistDir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to read IP list directory",
+		})
+		return
+	}
+
+	// 收集所有文件（不过滤文件扩展名）
+	var files []IPListFileInfo
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		files = append(files, IPListFileInfo{
+			Filename: entry.Name(),
+			Modified: info.ModTime(),
+			Size:     info.Size(),
+		})
+	}
+
+	// 按修改时间倒序排列
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Modified.After(files[j].Modified)
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"count": len(files),
+		"files": files,
+	})
+}
+
+// SaveIPList 保存IP列表到指定文件
 func SaveIPList(c *gin.Context) {
+	filename := c.Param("filename")
+
+	// 如果没有指定文件名，使用默认值
+	if filename == "" {
+		filename = DefaultIPListFile
+	}
+
+	// 安全检查
+	if filename == "" || filepath.Dir(filename) != "." {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid filename",
+		})
+		return
+	}
+
 	var req IPListRequest
 
 	// 绑定JSON数据
@@ -39,10 +130,24 @@ func SaveIPList(c *gin.Context) {
 		return
 	}
 
-	// 确保data目录存在
-	if err := os.MkdirAll(DataDir, 0755); err != nil {
+	// 确保目录存在
+	iplistDir := filepath.Join(DataDir, IPListDir)
+	if err := os.MkdirAll(iplistDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to create data directory",
+			"error": "Failed to create IP list directory",
+		})
+		return
+	}
+
+	// 构建完整路径
+	filePath := filepath.Join(iplistDir, filename)
+
+	// 安全检查：防止路径遍历
+	absPath, _ := filepath.Abs(filePath)
+	absIPListDir, _ := filepath.Abs(iplistDir)
+	if !filepath.HasPrefix(absPath, absIPListDir) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid file path",
 		})
 		return
 	}
@@ -54,7 +159,6 @@ func SaveIPList(c *gin.Context) {
 	}
 
 	// 写入文件
-	filePath := filepath.Join(DataDir, IPListFileName)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to save IP list",
@@ -63,14 +167,41 @@ func SaveIPList(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "IP list saved successfully",
-		"count":   len(req.IPList),
+		"message":  "IP list saved successfully",
+		"filename": filename,
+		"count":    len(req.IPList),
 	})
 }
 
 // GetIPList 获取IP列表（查询）
 func GetIPList(c *gin.Context) {
-	filePath := filepath.Join(DataDir, IPListFileName)
+	filename := c.Param("filename")
+
+	// 如果没有指定文件名，使用默认值
+	if filename == "" {
+		filename = DefaultIPListFile
+	}
+
+	// 安全检查
+	if filename == "" || filepath.Dir(filename) != "." {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid filename",
+		})
+		return
+	}
+
+	iplistDir := filepath.Join(DataDir, IPListDir)
+	filePath := filepath.Join(iplistDir, filename)
+
+	// 安全检查：防止路径遍历
+	absPath, _ := filepath.Abs(filePath)
+	absIPListDir, _ := filepath.Abs(iplistDir)
+	if !filepath.HasPrefix(absPath, absIPListDir) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid file path",
+		})
+		return
+	}
 
 	// 检查文件是否存在
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -113,6 +244,21 @@ func GetIPList(c *gin.Context) {
 
 // UpdateIPList 更新IP列表（修改）
 func UpdateIPList(c *gin.Context) {
+	filename := c.Param("filename")
+
+	// 如果没有指定文件名，使用默认值
+	if filename == "" {
+		filename = DefaultIPListFile
+	}
+
+	// 安全检查
+	if filename == "" || filepath.Dir(filename) != "." {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid filename",
+		})
+		return
+	}
+
 	var req IPListRequest
 
 	// 绑定JSON数据
@@ -123,10 +269,24 @@ func UpdateIPList(c *gin.Context) {
 		return
 	}
 
-	// 确保data目录存在
-	if err := os.MkdirAll(DataDir, 0755); err != nil {
+	// 确保目录存在
+	iplistDir := filepath.Join(DataDir, IPListDir)
+	if err := os.MkdirAll(iplistDir, 0755); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to create data directory",
+			"error": "Failed to create IP list directory",
+		})
+		return
+	}
+
+	// 构建完整路径
+	filePath := filepath.Join(iplistDir, filename)
+
+	// 安全检查：防止路径遍历
+	absPath, _ := filepath.Abs(filePath)
+	absIPListDir, _ := filepath.Abs(iplistDir)
+	if !filepath.HasPrefix(absPath, absIPListDir) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid file path",
 		})
 		return
 	}
@@ -138,7 +298,6 @@ func UpdateIPList(c *gin.Context) {
 	}
 
 	// 写入文件
-	filePath := filepath.Join(DataDir, IPListFileName)
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to update IP list",
@@ -147,19 +306,46 @@ func UpdateIPList(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "IP list updated successfully",
-		"count":   len(req.IPList),
+		"message":  "IP list updated successfully",
+		"filename": filename,
+		"count":    len(req.IPList),
 	})
 }
 
 // DeleteIPList 删除IP列表（删除）
 func DeleteIPList(c *gin.Context) {
-	filePath := filepath.Join(DataDir, IPListFileName)
+	filename := c.Param("filename")
+
+	// 如果没有指定文件名，使用默认值
+	if filename == "" {
+		filename = DefaultIPListFile
+	}
+
+	// 安全检查
+	if filename == "" || filepath.Dir(filename) != "." {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid filename",
+		})
+		return
+	}
+
+	iplistDir := filepath.Join(DataDir, IPListDir)
+	filePath := filepath.Join(iplistDir, filename)
+
+	// 安全检查：防止路径遍历
+	absPath, _ := filepath.Abs(filePath)
+	absIPListDir, _ := filepath.Abs(iplistDir)
+	if !filepath.HasPrefix(absPath, absIPListDir) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid file path",
+		})
+		return
+	}
 
 	// 检查文件是否存在
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "IP list does not exist",
+			"message": "IP list file does not exist",
 		})
 		return
 	}
